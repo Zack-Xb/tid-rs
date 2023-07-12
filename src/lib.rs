@@ -13,6 +13,7 @@
 //! ```rust
 //! use tid::{LAContext, LAPolicy};
 //!
+//!
 //! #[tokio::main(flavor = "current_thread")]
 //! async fn main() {
 //!     let mut ctx = LAContext::new();
@@ -39,15 +40,25 @@ use std::os::raw::c_char;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
+use core_foundation::base::{CFType,CFTypeRef, TCFType};
 
 extern "C" {
     fn create_la_context() -> *mut c_void;
+    fn retain_la_context() -> *mut c_void;
     fn drop_la_context(ctx: *mut c_void);
     fn set_localized_cancel_title(ctx: *mut c_void, reason: *const c_char);
     fn can_evaluate_policy(ctx: *mut c_void, policy: i32) -> i32;
+    fn set_credential(ctx: *mut c_void, credential: *const c_char);
     fn evaluate_policy(
         ctx: *mut c_void,
         policy: i32,
+        reason: *const c_char,
+        user_data: *const c_void,
+        callback: *mut c_void,
+    );
+    fn evaluate_access_control(
+        ctx: *mut c_void,
+        access_control: *const c_void,
         reason: *const c_char,
         user_data: *const c_void,
         callback: *mut c_void,
@@ -154,6 +165,15 @@ impl LAContext {
         Self { inner: ctx }
     }
 
+    ///mashallah
+    pub fn retain (&self) -> Self {
+        let ctx = unsafe { retain_la_context() };
+        Self { inner: ctx }
+    }
+    /// convert to CFTypeRef
+    pub fn into_ref(self) -> *mut c_void  {
+        self.inner 
+    }
     /// set `localizedCancelTitle` property.
     ///
     /// The localized title for the cancel button in the dialog presented to the user during authentication.
@@ -174,6 +194,15 @@ impl LAContext {
         let title = CString::new(title).unwrap();
         unsafe {
             set_localized_cancel_title(self.inner, title.as_ptr());
+        }
+    }
+    /// set `SetCredential` property.
+    /// This is to set the password from before calling SecItemCopyMatching.
+    /// So we can use our custom ui to get the password.
+    pub fn set_credential(&mut self, credentials: &str) {
+        let credentials = CString::new(credentials).unwrap();
+        unsafe {
+            set_credential(self.inner, credentials.as_ptr());
         }
     }
 
@@ -203,6 +232,26 @@ impl LAContext {
         }
         fut.await
     }
+
+    /// Evaluates the specified access control object.
+    pub async fn evaluate_access_control(
+        &self,
+        access_control: CFType,
+        localized_reason: &str,
+    ) -> Result<(), LAError> {
+        let reason = CString::new(localized_reason).unwrap();
+        let fut = EvaluateFuture::new();
+        unsafe {
+            evaluate_access_control(
+                self.inner,
+                access_control.as_CFTypeRef(),
+                reason.as_ptr(),
+                fut.inner.clone().into_raw() as *mut c_void,
+                evaluate_callback as *mut c_void,
+            );
+        }
+        fut.await
+    }
 }
 
 impl Default for LAContext {
@@ -211,13 +260,14 @@ impl Default for LAContext {
     }
 }
 
+/* 
 impl Drop for LAContext {
     fn drop(&mut self) {
         unsafe {
             drop_la_context(self.inner);
         }
     }
-}
+}*/
 
 struct EvaluateFuture {
     inner: Rc<EvaluateFutureInner>,
